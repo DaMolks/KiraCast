@@ -17,6 +17,9 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        // ⬇️ Expose l’endpoint LibreTranslate au code (BuildConfig.LIBRETRANSLATE_URL)
+        buildConfigField("String", "LIBRETRANSLATE_URL", "\"https://libretranslate.de/translate\"")
     }
 
     buildFeatures { buildConfig = true }
