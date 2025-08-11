@@ -12,7 +12,9 @@ class MainActivity : Activity() {
     private lateinit var runtime: GeckoRuntime
     private lateinit var session: GeckoSession
 
-    // Remplace par ton propre endpoint/self-host si besoin
+    private var pagesVisited = 0
+
+    // Remplace par ton propre endpoint si besoin (self-host recommandé)
     private val TRANSLATE_ENDPOINT = "https://libretranslate.com/translate"
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -23,26 +25,21 @@ class MainActivity : Activity() {
         runtime = GeckoRuntime.create(this)
         session = GeckoSession()
 
-        // Extensions (uBlock + éventuel /detector)
+        // Extensions
         runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/ublock_origin.xpi")
         try {
             runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/detector/")
         } catch (_: Throwable) {
-            // optionnel, ignore si le dossier n'existe pas
+            // optionnel
         }
 
-        // Injecte la traduction quand la page est chargée
+        // Suivi de navigation + injection de la traduction
         session.progressDelegate = object : ProgressDelegate {
             override fun onPageStart(session: GeckoSession, url: String) {
-                // rien
+                pagesVisited += 1
             }
             override fun onPageStop(session: GeckoSession, success: Boolean) {
-                // Ne trad que les pages AniList
-                session.getCurrentUri()?.let { current ->
-                    if (current.contains("anilist.co")) {
-                        injectTranslateJS()
-                    }
-                }
+                injectTranslateJS()
             }
         }
 
@@ -53,16 +50,17 @@ class MainActivity : Activity() {
         session.loadUri("https://anilist.co/schedule")
     }
 
-    // Back : essaie de revenir si possible
     @Deprecated("Use OnBackPressedDispatcher on newer APIs")
     override fun onBackPressed() {
-        try {
-            if (session.canGoBack()) {
+        // Si on a au moins une page précédente, on tente un goBack
+        if (pagesVisited > 1) {
+            try {
                 session.goBack()
-            } else {
+                pagesVisited -= 1
+            } catch (_: Throwable) {
                 super.onBackPressed()
             }
-        } catch (_: Throwable) {
+        } else {
             super.onBackPressed()
         }
     }
@@ -72,14 +70,11 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    /**
-     * Injecte un script qui traduit en FR la page, en évitant (autant que possible)
-     * les titres courts/romaji (heuristique simple côté JS).
-     */
     private fun injectTranslateJS() {
         val js = """
             (function(){
               if (window.__kiracastTranslated) return;
+              if (!/\.?anilist\.co$/.test(location.hostname)) return;
               window.__kiracastTranslated = true;
 
               const endpoint = "${TRANSLATE_ENDPOINT}";
@@ -88,9 +83,10 @@ class MainActivity : Activity() {
               function shouldSkip(node) {
                 if (node.nodeType !== Node.TEXT_NODE) return false;
                 const t = (node.textContent || "").trim();
-                if (!t) return true; // vide
-                // évite de toucher aux petits fragments typiques (romaji / sigles / épisodes)
-                if (/^[\x00-\x7F]{1,20}$/.test(t) && /\b(s1|ep|bd|tv|ova|ona)\b/i.test(t)) return true;
+                if (!t) return true;
+                // heuristique: éviter les petits fragments & romaji/titres courts
+                if (/^[\x00-\x7F]{1,20}$/.test(t)) return true;
+
                 const p = node.parentElement;
                 if (!p) return false;
                 const skipClasses = ["title","heading","name","romaji"];
@@ -147,12 +143,7 @@ class MainActivity : Activity() {
             })();
         """.trimIndent()
 
-        // Injection via URL javascript: (compatible toutes versions)
         val jsUrl = "javascript:(function(){try{$js}catch(e){console.warn('inject fail',e);}})()"
-        try {
-            session.loadUri(jsUrl)
-        } catch (_: Throwable) {
-            // ignore si navigation en cours
-        }
+        try { session.loadUri(jsUrl) } catch (_: Throwable) { }
     }
 }
