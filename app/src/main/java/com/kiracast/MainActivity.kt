@@ -24,16 +24,14 @@ class MainActivity : Activity() {
         controller.installBuiltIn("resource://android/assets/extensions/detector/")
 
         session.open(runtime)
-        view.setSession(session)
+        view.session = session
         session.loadUri("https://example.com")
     }
 
+    // TODO: brancher un Navigation/History delegate pour savoir si on peut revenir en arrière
+    // et appeler session.goBack() en conséquence.
     override fun onBackPressed() {
-        if (session.canGoBack()) {
-            session.goBack()
-        } else {
-            super.onBackPressed()
-        }
+        super.onBackPressed()
     }
 
     override fun onDestroy() {
