@@ -29,7 +29,7 @@ class MainActivity : Activity() {
     }
 
     override fun onBackPressed() {
-        if (session.canGoBack) {
+        if (session.canGoBack()) {
             session.goBack()
         } else {
             super.onBackPressed()
