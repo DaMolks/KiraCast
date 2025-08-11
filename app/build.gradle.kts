@@ -96,7 +96,7 @@ tasks.register("fetchUBlock") {
 tasks.named("preBuild").configure { dependsOn("fetchUBlock") }
 
 dependencies {
-    // GeckoView (fourni par le dépôt Mozilla ajouté dans settings.gradle.kts)
+    // GeckoView
     implementation("org.mozilla.geckoview:geckoview:130.0.+")
 
     // Media3 / ExoPlayer
@@ -112,6 +112,7 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-moshi:2.9.0")
     implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
+    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0") // ⬅️ AJOUT
 
     // Persistance
     implementation("androidx.room:room-runtime:2.6.1")
