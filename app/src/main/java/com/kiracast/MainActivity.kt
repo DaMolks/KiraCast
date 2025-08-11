@@ -4,14 +4,13 @@ import android.app.Activity
 import android.os.Bundle
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSession.NavigationDelegate
 import org.mozilla.geckoview.GeckoView
 
 class MainActivity : Activity() {
 
     private lateinit var runtime: GeckoRuntime
     private lateinit var session: GeckoSession
-
-    private val anilistScheduleUrl = "https://anilist.co/schedule"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -21,169 +20,37 @@ class MainActivity : Activity() {
         runtime = GeckoRuntime.create(this)
         session = GeckoSession()
 
-        // Extensions locales (uBlock + detector) si présentes
-        val controller = runtime.webExtensionController
-        controller.installBuiltIn("resource://android/assets/extensions/ublock_origin.xpi")
-        controller.installBuiltIn("resource://android/assets/extensions/detector/")
+        // Extensions (uBlock + répertoire detector facultatif)
+        runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/ublock_origin.xpi")
+        runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/detector/")
 
-        // Injecte la traduction à chaque fin de chargement
-        session.progressDelegate = object : GeckoSession.ProgressDelegate {
-            override fun onPageStop(session: GeckoSession, success: Boolean) {
-                val url = session.currentUri ?: return
-                if (url.startsWith(anilistScheduleUrl)) {
-                    injectTranslateScript()
-                }
+        // Delegate navigation : injecte la trad quand l’URL change
+        session.navigationDelegate = object : NavigationDelegate {
+            override fun onLocationChange(
+                session: GeckoSession,
+                url: String,
+                triggeredByRedirect: Boolean
+            ) {
+                maybeTranslate(url)
             }
         }
 
         session.open(runtime)
         view.setSession(session)
-        session.loadUri(anilistScheduleUrl)
+
+        // Page d’accueil : calendrier des sorties AniList
+        session.loadUri("https://anilist.co/schedule")
     }
 
-    // Injection JS via scheme javascript: (simple, pas d’extension nécessaire)
-    private fun injectTranslateScript() {
-        // JS compact : marque les titres comme non traduisibles, puis traduit le reste via LibreTranslate
-        val js = """
-            (function(){
-              const LT_URL = ${json(BuildConfig.LIBRETRANSLATE_URL)};
-
-              // 1) Marquer les éléments "titre" pour ne jamais les traduire
-              function markTitles(root=document){
-                const selectors = [
-                  // Titres courants sur AniList (garde large et prudente)
-                  '[class*="title"]',
-                  '.media-card h3, .media-card a[href*="/anime/"] h3, .media-card a[href*="/manga/"] h3',
-                  'a[href*="/anime/"][class*="title"], a[href*="/manga/"][class*="title"]'
-                ];
-                selectors.forEach(sel=>{
-                  root.querySelectorAll(sel).forEach(el=>{
-                    el.setAttribute('translate','no');
-                    el.classList.add('notranslate');
-                  });
-                });
-              }
-
-              // 2) Récupère tous les TextNodes traduisibles
-              function textNodesUnder(el){
-                const nodes=[]; const walker=document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
-                  acceptNode(n){
-                    if(!n.nodeValue) return NodeFilter.FILTER_REJECT;
-                    const t = n.nodeValue.trim();
-                    if(t.length < 2) return NodeFilter.FILTER_REJECT;
-                    const p = n.parentElement;
-                    if(!p) return NodeFilter.FILTER_REJECT;
-                    // Ignore ce qui est déjà marqué non traduisible
-                    if(p.closest('.notranslate,[translate="no"]')) return NodeFilter.FILTER_REJECT;
-                    // Ignore les <script>, <style>, inputs, etc.
-                    const tn = p.tagName;
-                    if(/^(SCRIPT|STYLE|NOSCRIPT|CODE|PRE|TEXTAREA|INPUT|SELECT|OPTION)$/i.test(tn)) return NodeFilter.FILTER_REJECT;
-                    // Heuristique: ignore textes très courts souvent "romaji" (ex: "S1", "OVA", etc.)
-                    if(t.length <= 3) return NodeFilter.FILTER_REJECT;
-                    return NodeFilter.FILTER_ACCEPT;
-                  }
-                });
-                while(walker.nextNode()) nodes.push(walker.currentNode);
-                return nodes;
-              }
-
-              // 3) Découpe en batchs pour l’API
-              function chunk(arr, size){ const out=[]; for(let i=0;i<arr.length;i+=size) out.push(arr.slice(i,i+size)); return out;}
-
-              async function translateBatch(texts){
-                // LibreTranslate format
-                const body = {
-                  q: texts,
-                  source: "auto",
-                  target: "fr",
-                  format: "text"
-                };
-                const res = await fetch(LT_URL, {
-                  method: "POST",
-                  headers: { "Content-Type":"application/json" },
-                  body: JSON.stringify(body),
-                  // Beaucoup d'instances LibreTranslate ont CORS ouvert; si ce n'est pas le cas, on verra un échec (à proxyser côté natif).
-                });
-                if(!res.ok) throw new Error("LibreTranslate HTTP "+res.status);
-                const data = await res.json();
-                // data = [{translatedText:"..."}, ...] ou string si une seule entrée
-                if (Array.isArray(texts)) {
-                  if (Array.isArray(data)) return data.map(d=>d.translatedText ?? d);
-                  // fallback (certains déploiements renvoient un objet unique)
-                  return [data.translatedText ?? String(data)];
-                } else {
-                  return [data.translatedText ?? String(data)];
-                }
-              }
-
-              async function run(){
-                markTitles(document);
-
-                const nodes = textNodesUnder(document.body);
-                if(nodes.length === 0) return;
-
-                // Map des valeurs originales (pour idempotence)
-                const originals = nodes.map(n=>n.nodeValue);
-
-                // Batching (évite des requêtes trop grosses)
-                const BATCH_SIZE = 30;
-                const batches = chunk(originals, BATCH_SIZE);
-
-                let idx = 0;
-                for(const batch of batches){
-                  try{
-                    const translated = await translateBatch(batch);
-                    for(let i=0;i<translated.length;i++){
-                      const n = nodes[idx+i];
-                      if(n && n.nodeValue === originals[idx+i]) {
-                        n.nodeValue = translated[i];
-                      }
-                    }
-                    idx += batch.length;
-                  } catch(e){
-                    console.warn("Traduction batch échouée:", e);
-                    idx += batch.length; // continue
-                  }
-                }
-              }
-
-              // Observer pour le contenu chargé dynamiquement (scroll infini)
-              const mo = new MutationObserver((muts)=>{
-                let need = false;
-                for(const m of muts){
-                  for(const node of m.addedNodes){
-                    if(node.nodeType === 1){ // ELEMENT_NODE
-                      markTitles(node);
-                      need = true;
-                    }
-                  }
-                }
-                if(need) run();
-              });
-              mo.observe(document.documentElement, {childList:true, subtree:true});
-
-              // Premier passage
-              run();
-            })();
-        """.trimIndent()
-
-        session.loadUri("javascript:" + js.encodeForJsUrl())
-    }
-
-    // Petit utilitaire pour embarquer des guillemets/retours à la ligne proprement
-    private fun String.encodeForJsUrl(): String =
-        this.replace("%", "%25")
-            .replace("\n", "%0A")
-            .replace("\r", "")
-            .replace("\"", "%22")
-            .replace("#", "%23")
-            .replace("'", "%27")
-            .replace(" ", "%20")
-
+    // Back : on tente un retour, sinon on ferme
+    @Deprecated("Use OnBackPressedDispatcher on newer APIs")
     override fun onBackPressed() {
-        // Basé sur l’historique, si dispo
-        // On tente un goBack via JS car GeckoView n’expose pas canGoBack directement.
-        session.loadUri("javascript:(history.length>1)?history.back():void(0)")
+        // Certaines versions n’exposent pas canGoBack : on essaie, et si pas d’historique, on finit
+        try {
+            session.goBack()
+        } catch (_: Throwable) {
+            super.onBackPressed()
+        }
     }
 
     override fun onDestroy() {
@@ -191,6 +58,101 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    // Util pour insérer proprement une string JSON dans le JS
-    private fun json(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+    /**
+     * Détermine si on traduit la page en français, en évitant de toucher aux titres romaji
+     * (la logique pour détecter les blocs à exclure est gérée côté JS injecté).
+     */
+    private fun maybeTranslate(url: String) {
+        // Exemple : on traduit anilist.co en FR
+        if (!url.contains("anilist.co")) return
+
+        val endpoint = BuildConfig.LIBRETRANSLATE_URL // défini dans build.gradle.kts
+        val js = """
+            (function(){
+              // Ne retraduis pas si déjà fait
+              if (window.__kiracastTranslated) return;
+              window.__kiracastTranslated = true;
+
+              const endpoint = "${endpoint}";
+              const targetLang = "fr";
+
+              // Collecte le texte à traduire sauf les titres romaji (heuristique simple)
+              function shouldSkip(node) {
+                // Heuristique: classes/tags typiques de titres ou éléments courts style romaji
+                const skipClasses = ["title", "heading", "name", "romaji"];
+                if (node.nodeType !== Node.TEXT_NODE) return false;
+                const t = node.textContent?.trim() || "";
+                if (!t) return true;                         // rien à traduire
+                if (/^[\x00-\x7F]{1,20}$/.test(t) && /\b(s1|ep|bd|tv|ova|ona)\b/i.test(t)) return true; // trucs courts
+                const p = node.parentElement;
+                if (!p) return false;
+                if (skipClasses.some(c => p.classList.contains(c))) return true;
+                if (/^H[1-4]$/.test(p.tagName)) return true;
+                return false;
+              }
+
+              function walkAndCollect(root) {
+                const nodes = [];
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                  acceptNode: (n) => shouldSkip(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+                });
+                let cur;
+                while ((cur = walker.nextNode())) {
+                  const txt = cur.textContent?.trim();
+                  if (txt && txt.length > 1) {
+                    nodes.push(cur);
+                  }
+                }
+                return nodes;
+              }
+
+              async function translateBatch(texts) {
+                const body = {
+                  q: texts,
+                  source: "en",
+                  target: targetLang,
+                  format: "text"
+                };
+                const res = await fetch(endpoint, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(body)
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const data = await res.json();
+                // LibreTranslate renvoie un tableau d'objets { translatedText }
+                if (Array.isArray(data)) return data.map(d => d.translatedText || "");
+                // Certains proxys renvoient { translatedText } pour une seule entrée
+                if (data.translatedText) return [data.translatedText];
+                return [];
+              }
+
+              (async () => {
+                try {
+                  const nodes = walkAndCollect(document.body);
+                  if (nodes.length === 0) return;
+
+                  // Découpe en petits lots pour éviter de surcharger
+                  const chunkSize = 30;
+                  for (let i = 0; i < nodes.length; i += chunkSize) {
+                    const slice = nodes.slice(i, i + chunkSize);
+                    const src = slice.map(n => n.textContent);
+                    const dst = await translateBatch(src);
+                    for (let k = 0; k < slice.length && k < dst.length; k++) {
+                      slice[k].textContent = dst[k];
+                    }
+                  }
+                } catch (e) {
+                  console.warn("KiraCast translate error:", e);
+                }
+              })();
+            })();
+        """.trimIndent()
+
+        try {
+            session.evaluateJS(js, null)
+        } catch (_: Throwable) {
+            // Silencieux si l’injection échoue (navigation en cours, etc.)
+        }
+    }
 }
