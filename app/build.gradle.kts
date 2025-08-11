@@ -93,24 +93,30 @@ tasks.register("fetchUBlock") {
 tasks.named("preBuild").configure { dependsOn("fetchUBlock") }
 
 dependencies {
-    // GeckoView (utiliser la classique: artefact dispo sur Maven Central)
-    implementation("org.mozilla.geckoview:geckoview:128.+")
+    // GeckoView (fourni par le dépôt Mozilla ajouté dans settings.gradle.kts)
+    implementation("org.mozilla.geckoview:geckoview:130.0.+")
+
     // Media3 / ExoPlayer
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
     implementation("androidx.media3:media3-exoplayer-dash:1.3.1")
+
     // Cast Framework
     implementation("com.google.android.gms:play-services-cast-framework:21.4.0")
+
     // Réseau / JSON
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
     implementation("com.squareup.retrofit2:converter-moshi:2.9.0")
     implementation("com.squareup.moshi:moshi-kotlin:1.15.1")
+
     // Persistance
     implementation("androidx.room:room-runtime:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
+
     // Sécurité
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 }
