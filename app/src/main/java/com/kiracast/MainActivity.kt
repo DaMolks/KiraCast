@@ -4,13 +4,16 @@ import android.app.Activity
 import android.os.Bundle
 import org.mozilla.geckoview.GeckoRuntime
 import org.mozilla.geckoview.GeckoSession
-import org.mozilla.geckoview.GeckoSession.NavigationDelegate
 import org.mozilla.geckoview.GeckoView
+import org.mozilla.geckoview.GeckoSession.ProgressDelegate
 
 class MainActivity : Activity() {
 
     private lateinit var runtime: GeckoRuntime
     private lateinit var session: GeckoSession
+
+    // Remplace par ton propre endpoint/self-host si besoin
+    private val TRANSLATE_ENDPOINT = "https://libretranslate.com/translate"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -20,18 +23,26 @@ class MainActivity : Activity() {
         runtime = GeckoRuntime.create(this)
         session = GeckoSession()
 
-        // Extensions (uBlock + répertoire detector facultatif)
+        // Extensions (uBlock + éventuel /detector)
         runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/ublock_origin.xpi")
-        runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/detector/")
+        try {
+            runtime.webExtensionController.installBuiltIn("resource://android/assets/extensions/detector/")
+        } catch (_: Throwable) {
+            // optionnel, ignore si le dossier n'existe pas
+        }
 
-        // Delegate navigation : injecte la trad quand l’URL change
-        session.navigationDelegate = object : NavigationDelegate {
-            override fun onLocationChange(
-                session: GeckoSession,
-                url: String,
-                triggeredByRedirect: Boolean
-            ) {
-                maybeTranslate(url)
+        // Injecte la traduction quand la page est chargée
+        session.progressDelegate = object : ProgressDelegate {
+            override fun onPageStart(session: GeckoSession, url: String) {
+                // rien
+            }
+            override fun onPageStop(session: GeckoSession, success: Boolean) {
+                // Ne trad que les pages AniList
+                session.getCurrentUri()?.let { current ->
+                    if (current.contains("anilist.co")) {
+                        injectTranslateJS()
+                    }
+                }
             }
         }
 
@@ -42,77 +53,67 @@ class MainActivity : Activity() {
         session.loadUri("https://anilist.co/schedule")
     }
 
-    // Back : on tente un retour, sinon on ferme
+    // Back : essaie de revenir si possible
     @Deprecated("Use OnBackPressedDispatcher on newer APIs")
     override fun onBackPressed() {
-        // Certaines versions n’exposent pas canGoBack : on essaie, et si pas d’historique, on finit
         try {
-            session.goBack()
+            if (session.canGoBack()) {
+                session.goBack()
+            } else {
+                super.onBackPressed()
+            }
         } catch (_: Throwable) {
             super.onBackPressed()
         }
     }
 
     override fun onDestroy() {
-        session.close()
+        try { session.close() } catch (_: Throwable) {}
         super.onDestroy()
     }
 
     /**
-     * Détermine si on traduit la page en français, en évitant de toucher aux titres romaji
-     * (la logique pour détecter les blocs à exclure est gérée côté JS injecté).
+     * Injecte un script qui traduit en FR la page, en évitant (autant que possible)
+     * les titres courts/romaji (heuristique simple côté JS).
      */
-    private fun maybeTranslate(url: String) {
-        // Exemple : on traduit anilist.co en FR
-        if (!url.contains("anilist.co")) return
-
-        val endpoint = BuildConfig.LIBRETRANSLATE_URL // défini dans build.gradle.kts
+    private fun injectTranslateJS() {
         val js = """
             (function(){
-              // Ne retraduis pas si déjà fait
               if (window.__kiracastTranslated) return;
               window.__kiracastTranslated = true;
 
-              const endpoint = "${endpoint}";
+              const endpoint = "${TRANSLATE_ENDPOINT}";
               const targetLang = "fr";
 
-              // Collecte le texte à traduire sauf les titres romaji (heuristique simple)
               function shouldSkip(node) {
-                // Heuristique: classes/tags typiques de titres ou éléments courts style romaji
-                const skipClasses = ["title", "heading", "name", "romaji"];
                 if (node.nodeType !== Node.TEXT_NODE) return false;
-                const t = node.textContent?.trim() || "";
-                if (!t) return true;                         // rien à traduire
-                if (/^[\x00-\x7F]{1,20}$/.test(t) && /\b(s1|ep|bd|tv|ova|ona)\b/i.test(t)) return true; // trucs courts
+                const t = (node.textContent || "").trim();
+                if (!t) return true; // vide
+                // évite de toucher aux petits fragments typiques (romaji / sigles / épisodes)
+                if (/^[\x00-\x7F]{1,20}$/.test(t) && /\b(s1|ep|bd|tv|ova|ona)\b/i.test(t)) return true;
                 const p = node.parentElement;
                 if (!p) return false;
+                const skipClasses = ["title","heading","name","romaji"];
                 if (skipClasses.some(c => p.classList.contains(c))) return true;
                 if (/^H[1-4]$/.test(p.tagName)) return true;
                 return false;
               }
 
-              function walkAndCollect(root) {
-                const nodes = [];
+              function collectTextNodes(root) {
+                const out = [];
                 const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
                   acceptNode: (n) => shouldSkip(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
                 });
                 let cur;
                 while ((cur = walker.nextNode())) {
                   const txt = cur.textContent?.trim();
-                  if (txt && txt.length > 1) {
-                    nodes.push(cur);
-                  }
+                  if (txt && txt.length > 1) out.push(cur);
                 }
-                return nodes;
+                return out;
               }
 
               async function translateBatch(texts) {
-                const body = {
-                  q: texts,
-                  source: "en",
-                  target: targetLang,
-                  format: "text"
-                };
+                const body = { q: texts, source: "en", target: targetLang, format: "text" };
                 const res = await fetch(endpoint, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -120,19 +121,16 @@ class MainActivity : Activity() {
                 });
                 if (!res.ok) throw new Error("HTTP " + res.status);
                 const data = await res.json();
-                // LibreTranslate renvoie un tableau d'objets { translatedText }
                 if (Array.isArray(data)) return data.map(d => d.translatedText || "");
-                // Certains proxys renvoient { translatedText } pour une seule entrée
                 if (data.translatedText) return [data.translatedText];
                 return [];
               }
 
               (async () => {
                 try {
-                  const nodes = walkAndCollect(document.body);
+                  const nodes = collectTextNodes(document.body);
                   if (nodes.length === 0) return;
 
-                  // Découpe en petits lots pour éviter de surcharger
                   const chunkSize = 30;
                   for (let i = 0; i < nodes.length; i += chunkSize) {
                     const slice = nodes.slice(i, i + chunkSize);
@@ -149,10 +147,12 @@ class MainActivity : Activity() {
             })();
         """.trimIndent()
 
+        // Injection via URL javascript: (compatible toutes versions)
+        val jsUrl = "javascript:(function(){try{$js}catch(e){console.warn('inject fail',e);}})()"
         try {
-            session.evaluateJS(js, null)
+            session.loadUri(jsUrl)
         } catch (_: Throwable) {
-            // Silencieux si l’injection échoue (navigation en cours, etc.)
+            // ignore si navigation en cours
         }
     }
 }
